@@ -2,6 +2,7 @@
  *      
  *  11-6-2023   www.glowpon3.com
  *   5-27-2024 updated by Glowpon3
+ *   6-26-2024 updated by Glowpon3 for serial control
  */
 
 // defines pins numbers
@@ -32,6 +33,10 @@ String oldAck = "";  //serial report handling
 String newAck = "";  //serial report handling
 int debugV = 0;  //for vref debug cleanup
 int debugD = 0;  //for delay debug cleanup
+int debugM = 0;  //for simple debug
+bool flock = false;  //for manual control of enable pin
+unsigned int stepRoll = 0;  //for debug output of distance travelled.
+bool dir = true;  //for filament change and direction control
 
 
 void setup() {
@@ -43,19 +48,16 @@ void setup() {
   pinMode(inputVref,INPUT);
   pinMode(inputSIO,INPUT);
   //start serial comms
-  Serial.begin(9600);
+  Serial.begin(115200);
 }
 
 
 void loop() {
-  SIOenable = digitalRead(inputSIO); //check the SIO pin to see if feeder should be enabled. use SIOenable = 1 if SIO is not connected
-  digitalWrite(dirPin,HIGH); // makes sure motor is turning the correct way.  Change to LOW to reverse extruder gear direction
-
-  if (SIOenable) {
-    digitalWrite(enPin,LOW);  // Enables the stepper driver board
-  }
+  if(dir){
+    digitalWrite(dirPin,HIGH); // makes sure motor is turning the correct way.  Change to LOW to reverse extruder gear direction
+  } 
   else {
-    digitalWrite(enPin,HIGH);  // Disable the stepper driver board
+    digitalWrite(dirPin,LOW); // reverse direction flow if dir is false
   }
 
   //read tension pin
@@ -64,6 +66,7 @@ void loop() {
   //While input is high (not shorted to ground) accellerate to full speed
   while (tensionLow == 1) {
     checkSerial();
+    checkEnable();
     tensionLow = digitalRead(inputTensionLow);  //read tension pin and update variable for while loop
     digitalWrite(feedDebugPin,HIGH);  //set debug pin high while stepping for output to SIO
     vref1 = analogRead(inputVref);  //test vref for serial debug
@@ -76,15 +79,19 @@ void loop() {
       digitalWrite(stepPin,LOW);  //output second step
       delayMicroseconds(delayStep);  //delay
     }
+    stepRoll += 1;  //increment distance tracker
     delayStep -= (delayStep/p);  //decrement delayStep by (delayStep / p) produces accelleration curve instead of linear
     if (delayStep < minDelay) {delayStep = minDelay;}  //make sure delayStep isn't below minDelay and correct if needed
-    newAck = ("Delay " + String(delayStep*debugD) + "-Feeding " + String(vref2) + " Vref on?" + String(debugV));
-    ack();
+    if(debugM){
+      newAck = ("Delay " + String(delayStep*debugD) + "-Feeding " + String(vref2) + " Vref on? " + String(debugV) + " Distance " + String(stepRoll));
+      ack();
+    };
   }  //end while loop High
 
   //whiel tension is low, slow stepper and then stop
   while (tensionLow == 0) {
     checkSerial();
+    checkEnable();
     tensionLow = digitalRead(inputTensionLow);  //read tension pin and update variable for while loop
     digitalWrite(feedDebugPin,LOW);  //set debug pin low while stepping
     vref1 = analogRead(inputVref);
@@ -97,15 +104,18 @@ void loop() {
         digitalWrite(stepPin,LOW);
         delayMicroseconds(delayStep);
       }  //for loop for duplicating steps for microstepping
+      stepRoll += 1;  //increment distance tracker
     }  //end if loop for stopping extruder 
     delayStep += d;  //decrement delayStep by d
     if (delayStep > maxDelay) delayStep = maxDelay;  //make sure delayStep isn't above maxDelay and correct if needed
-    if (delayStep == maxDelay){
-      newAck = ("Delay " + String(delayStep*debugD) + "-Stopped " + String(vref2) + " Vref on? " + String(debugV));
-    } else {
-      newAck = ("Delay " + String(delayStep*debugD) + "-Slowing " + String(vref2) + " Vref on? " + String(debugV));
-    }
-    ack();
+    if(debugM){
+      if (delayStep == maxDelay){
+        newAck = ("Delay " + String(delayStep*debugD) + "-Stopped " + String(vref2) + " Vref on? " + String(debugV) + " Distance " + String(stepRoll));
+      } else {
+        newAck = ("Delay " + String(delayStep*debugD) + "-Slowing " + String(vref2) + " Vref on? " + String(debugV) + " Distance " + String(stepRoll));
+      };
+      ack();
+    };
   }  //end while loop Low
 
 } //end of void loop
@@ -117,6 +127,21 @@ void ack() {
     };  //if Acknowledgement has changed, report to serial and update oldAck
 }
 
+void checkEnable(){
+  if (flock) {
+    digitalWrite(enPin, LOW);  // Enable stepper driver board regardless of SIO input
+  }
+  else {
+    SIOenable = digitalRead(inputSIO); //check the SIO pin to see if feeder should be enabled. use SIOenable = 1 if SIO is not connected
+    if (SIOenable) {
+      digitalWrite(enPin,LOW);  // Enables the stepper driver board
+    }
+    else {
+      digitalWrite(enPin,HIGH);  // Disable the stepper driver board
+    };
+  };
+}
+
 void checkSerial(){
   if (Serial.available()){
     
@@ -125,7 +150,7 @@ void checkSerial(){
     int sepPos = buf.indexOf(" ");
     String command ="";
     String value = "";
-    
+
     if(sepPos !=-1){
       //if the index of a separator exists then calculate the command and the value after the separator
       command = buf.substring(0,sepPos);
@@ -135,44 +160,158 @@ void checkSerial(){
       command = buf;
     }
     command.toLowerCase();  //convert command to Lower Case
+    
+    if(debugD || debugM){
+      if(command != ""){
+        debugD = 0;
+        debugM = 0;
+        Serial.println("Monitor halted, ready for command:");
+      };
+    };
+    
     if(command.startsWith("?") || command == "help"){
       Serial.println(F("Help:"));
       Serial.println(F("Commands:"));
-      Serial.println(F("V on/off (enable Vref output)"));
-      Serial.println(F("D on/off (enable Delay output)"));
+      Serial.println(F("m (monitor activity)"));
+      Serial.println(F("Vout on/off (enable Vref output)"));
+      Serial.println(F("Dout (enable Delay output)"));
+      Serial.println(F("send any key to exit monitoring"));
+      Serial.println(F("report (echo variables)"));
+      Serial.println(F("Delay (impermanantly set delay)"));
+      Serial.println(F("mind (set max speed)"));
+      Serial.println(F("maxd (set min speed)"));
+      Serial.println(F("P (controls accelleration d -= d/p)"));
+      Serial.println(F("I (depreciated)"));
+      Serial.println(F("D (controls decelleration d += d)"));
+      Serial.println(F("flock on/off (locks enable pin on)"));
+      Serial.println(F("count (reset steproll count)"));
+      Serial.println(F("steps (set microstepping mode)"));
+      Serial.println(F("! (emergency restore defaults with flock enabled)"));
+      Serial.println(F("C (change direction)"));
     }
-    else if(command == "v"){ 
+    else if(command == "vout"){
       if (value == "on" || value == "1") {
         debugV = 1;
         Serial.println("Vref debug on");
-
       }
-      else if(value == "off" || value == "0") {
+      else if(value == "off" || value == "0"){
         debugV = 0;
         Serial.println("Vref debug off");
-
       }
       else {
         Serial.println("value not recognized, use on/off or 1/0");
       }
+      return;
+    } 
+    else if(command == "dout"){ 
+      debugD = 1;
+      Serial.println("Delay debug on");
+      return;
+    } 
+    else if(command == "m"){ 
+      debugM = 1;
+      Serial.println("monitor on");
+      return;
+    } 
+    else if(command == "report"){ 
+
+      Serial.println("delay----" + String(delayStep));
+      Serial.println("mindelay-" + String(minDelay));
+      Serial.println("maxdelay-" + String(maxDelay));
+      Serial.println("p--------" + String(p));
+      Serial.println("i--------" + String(i));
+      Serial.println("d--------" + String(d));
+      Serial.println("Flock----" + String(flock));
+      Serial.println("Steps----" + String(stepRoll));
+      Serial.println("MSteps---" + String(stepMode));
+      return;
+    } 
+    else if(command == "delay"){ 
+      delayStep = value.toInt();
+      Serial.println("delay = " + String(delayStep));
+      return;
+    } 
+    else if(command == "mind"){ 
+      minDelay = value.toInt();
+      Serial.println("mindelay = " + String(minDelay));
+      return;
+    } 
+    else if(command == "maxd"){ 
+      maxDelay = value.toInt();
+      Serial.println("maxdelay = " + String(maxDelay));
+      return;
+    } 
+    else if(command == "p"){ 
+      p = value.toInt();
+      Serial.println("P = " + String(p));
+      return;
+    } 
+    else if(command == "i"){ 
+      i = value.toInt();
+      Serial.println("I = " + String(i));
       return;
     } 
     else if(command == "d"){ 
+      d = value.toInt();
+      Serial.println("D = " + String(d));
+      return;
+    } 
+    else if(command == "flock"){ 
       if (value == "on" || value == "1") {
-        debugD = 1;
-        Serial.println("Delay debug on");
+        flock = true;
+        Serial.println("Feed-Lock ON");
 
       }
       else if(value == "off" || value == "0") {
-        debugD = 0;
-        Serial.println("Delay debug off");
+        flock = false;
+        Serial.println("Feed-Lock OFF");
 
       }
       else {
         Serial.println("value not recognized, use on/off or 1/0");
       }
       return;
-    } 
+    }
+    else if(command == "count"){ 
+      stepRoll = 0;
+      Serial.println("Distance = " + String(stepRoll));
+      return;
+    }
+    else if(command == "steps"){ 
+      stepMode = value.toInt();
+      Serial.println("Microstep mode = " + String(stepMode));
+      return;
+    }
+    else if(command == "!"){ 
+      delayStep = 1000;  //default speed when starting up
+      minDelay = 200;  //minimum delay (fastest feedrate)
+      maxDelay = 1000;  //maximum delay (slowest feedrate and idle trigger)
+      p=10;  //used to speed up feedrate using equation delayStep -= (delaystep/p)
+      i=2;  //depreciated
+      d=10;  //used to slow down feedrate using equation delayStep += d
+      stepMode = 8;  //microstepping mode used in for loops
+      debugV = 0;  //for vref debug cleanup
+      debugD = 0;  //for delay debug cleanup
+      debugM = 0;  //for simple debug
+      flock = true;  //for manual control of enable pin
+      stepRoll = 0;  //for debug output of distance travelled.
+      Serial.println("Emergency Defaults Restored!");
+      return;
+    }
+    else if(command == "c"){ 
+      if (value == "on" || value == "1") {
+        dir = false;
+        Serial.println("Direction Reversed");
+      }
+      else if(value == "off" || value == "0") {
+        dir = true;
+        Serial.println("Direction Forward");
+      }
+      else {
+        Serial.println("value not recognized, use on/off or 1/0");
+      }
+      return;
+    }
     else{
       Serial.print(F("ERR: bad cmnd["));Serial.print(command);Serial.println(F("]"));
     }
